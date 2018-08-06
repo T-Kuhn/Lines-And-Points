@@ -1,0 +1,170 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+#include "Common.cginc"
+
+struct Node
+{
+    float3 position;
+    float3 velocity;
+};
+
+struct Line
+{
+    int startNodeIndex;
+    int endNodeIndex;
+    float distance;
+};
+
+struct Parameters 
+{
+    int numOfLinesPerParticle;
+    int numOfNodes;
+    float simulationSpeed;
+    float boundingSphereRad;
+    float deltaTime;
+    float lineMinDist;
+};
+
+RWStructuredBuffer<Node> nodeBuffer;
+RWStructuredBuffer<Line> lineBuffer;
+RWStructuredBuffer<Parameters> parametersBuffer;
+
+// Check whether or not the index is already used as a endNodeIndex in one of the lines of this node.
+// return value:
+// -1   : Node index is already used.
+//  0 < : Node index.
+int checkIndex(uint3 id, int index, Parameters parameters)
+{
+    Line l;
+    [loop]
+    for(int lineNum = 0; lineNum < parameters.numOfLinesPerParticle; lineNum++)
+    {
+        l = lineBuffer[(int)id.x * parameters.numOfLinesPerParticle + lineNum];
+
+        if (l.endNodeIndex == index) 
+        { 
+            return -1;
+        }
+    }
+    return index;
+}
+
+// Return the index of a new node within distance if there is one.
+// Return -1 if there is no available node within distance.
+int getNodeIndexWithinDist(Node node, uint3 id, Parameters parameters)
+{
+    Node n;
+    float minDist = parameters.lineMinDist;
+
+    if ((int)id.x + 1 >= parameters.numOfNodes)
+    {
+        return -1;
+    }
+
+    // loop through all nodes
+    [loop]
+    for (int i = 0; i < parameters.numOfNodes; i++)
+    //for(int i = (int)id.x + 1; i < parameters.numOfNodes; i++)
+    {
+        // skip own node.
+        if (i == id.x) { continue; }
+
+        n = nodeBuffer[i];
+
+        //check distance
+        if(length(node.position - n.position) < minDist)
+        {
+            // We got a node within distance!
+            int index = checkIndex(id, i, parameters);
+            // check whether or not the index of this node is already in the line list.
+            if(index > 0)
+            {
+                return index;
+            }
+        }
+    }
+    return -1;
+}
+
+// Check if a already made connection still fits the requirements.
+// return the line if everything is fine.
+// return a empty line if the requirements (distance) were not met.
+Line checkActiveLine(Line l, Node node, Parameters parameters)
+{
+    l.distance = length(node.position - nodeBuffer[l.endNodeIndex].position);
+    if(l.distance > parameters.lineMinDist)
+    {
+        l.startNodeIndex = -1;
+        l.endNodeIndex = -1;
+    }
+
+    return l;
+}
+
+// Check if new lines can be formed.
+// Check if old lines can be deleted.
+// loop through all the lines of this particular node.
+void checkLines(Node node, uint3 id, Parameters parameters)
+{
+    Line l;
+    [loop]
+    for(int lineNum = 0; lineNum < parameters.numOfLinesPerParticle; lineNum++)
+    {
+        l = lineBuffer[(int)id.x * parameters.numOfLinesPerParticle + lineNum];
+
+        if (l.startNodeIndex < 0) 
+        { 
+            // no line. Try to find particle close by to create one!
+            int index = getNodeIndexWithinDist(node, id, parameters);
+
+            if (index > 0)
+            {
+                l.startNodeIndex = (int)id.x;
+                l.endNodeIndex = index;
+                l.distance = length(node.position - nodeBuffer[index].position);
+
+                lineBuffer[id.x * parameters.numOfLinesPerParticle + lineNum] = l;
+            }
+        } else
+        {
+            // there is a line. But is it still valid?
+            lineBuffer[(int)id.x * parameters.numOfLinesPerParticle + lineNum] = checkActiveLine(l, node, parameters);
+        }
+    }
+}
+
+// Make the nodes bounce back whenever they get too far away.
+float3 checkBoundries(Node node, uint id)
+{
+    if(length(node.position) > 50)
+    {
+        //return -normalize(node.velocity) + RandomVector(1 + id.x) * 4;
+        return -node.velocity;
+    }
+    return node.velocity;
+}
+
+// This is the main function of this shader.
+[numthreads(64, 1, 1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    // grab current data from buffer
+    Node node = nodeBuffer[id.x];
+
+    Parameters parameters = parametersBuffer[0];
+    Line l = lineBuffer[0];
+
+    // move particle
+    node.position = node.position + node.velocity * parameters.deltaTime * parameters.simulationSpeed;
+
+    // check boundries
+    node.velocity = checkBoundries(node, id);
+
+    node.position.z = 0;
+
+    // update node buffer
+    nodeBuffer[id.x] = node;
+
+    // fill-in / check lineBuffer for current Node
+    checkLines(node, id, parameters);
+}
